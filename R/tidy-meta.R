@@ -12,7 +12,11 @@
 #'   measure is back-transformed with its correct inverse via
 #'   [meta::backtransf()] (exponentiation for ratios, inverse-logit for
 #'   `PLOGIT`, Fisher's z to correlation for `ZCOR`, etc.); linear measures are
-#'   left unchanged. Use `"exp"` to force exponentiation or `"none"` to keep
+#'   left unchanged. Study rows of [meta::metaprop()] and [meta::metarate()]
+#'   objects get the observed `event / n` or `event / time` instead, as in
+#'   [meta::forest()], because the stored `TE` of a study with zero or all
+#'   events is continuity-corrected and so disagrees with its exact confidence
+#'   limits. Use `"exp"` to force exponentiation or `"none"` to keep
 #'   the analysis scale.
 #' @param sort_studies If `TRUE` (default), sort studies by effect estimate
 #'   (most favorable at top).
@@ -30,7 +34,8 @@
 #'   \item{ci_lower}{Lower confidence limit (numeric)}
 #'   \item{ci_upper}{Upper confidence limit (numeric)}
 #'   \item{se}{Standard error (numeric)}
-#'   \item{weight}{Study weight (numeric, \code{NA} for summaries)}
+#'   \item{weight}{Study weight (numeric, \code{NA} for summaries, and for
+#'     every study of a \code{method = "GLMM"} fit, which uses none)}
 #'   \item{p_value}{P-value (numeric)}
 #'   \item{n}{Sample size or person-time (numeric, optional)}
 #'   \item{event}{Number of events (numeric, optional)}
@@ -55,6 +60,7 @@
 #'
 #' @examples
 #' \donttest{
+#' if (requireNamespace("meta", quietly = TRUE)) {
 #' library(meta)
 #' m <- metabin(event.e, n.e, event.c, n.c,
 #'   data = data.frame(
@@ -65,6 +71,7 @@
 #'   sm = "RR"
 #' )
 #' tidy_meta(m)
+#' }
 #' }
 tidy_meta <- function(x, ...) {
   UseMethod("tidy_meta")
@@ -90,10 +97,16 @@ tidy_meta.default <- function(x, ...) {
 #'   TRUE`: `"common"`, `"random"`, or both (default).
 #' @param level Confidence level for the pooled summary interval. Default
 #'   `0.95`.
+#' @param log_scale For the data-frame method with `add_summary = TRUE`: are
+#'   the effects ratios (RR, OR, HR, ...) given on the natural scale? If `TRUE`,
+#'   they are pooled on the log scale and the summary is exponentiated back; a
+#'   supplied `se` must be the standard error of the log estimate. Default
+#'   `FALSE`.
 tidy_meta.data.frame <- function(x,
                                  add_summary = FALSE,
                                  summary_method = c("common", "random"),
                                  level = 0.95,
+                                 log_scale = FALSE,
                                  ...) {
   # If already a data frame (from standalone usage), validate and pass through
   required <- c("estimate", "ci_lower", "ci_upper", "studlab")
@@ -114,7 +127,8 @@ tidy_meta.data.frame <- function(x,
 
   # On-the-fly pooling: append summary rows computed from the study rows.
   if (isTRUE(add_summary)) {
-    summ <- build_summary_rows(x, method = summary_method, level = level)
+    summ <- build_summary_rows(x, method = summary_method, level = level,
+                               log_scale = log_scale)
     if (!is.null(summ)) {
       # Carry any extra user columns onto the summary rows as NA before binding.
       for (col in setdiff(names(x), names(summ))) summ[[col]] <- NA
@@ -210,6 +224,12 @@ tidy_meta.meta <- function(x,
   }
   all_rows <- back_transform(all_rows, sm, back_trans, n = n_row, time = time_row)
 
+  # Study rows of single-group measures carry the observed value, not the
+  # back-transformed (and possibly continuity-corrected) TE.
+  if (back_trans != "none") {
+    all_rows <- use_observed_estimates(all_rows, x)
+  }
+
   # ---- 8. Set attributes ----
   attr(all_rows, "sm")    <- sm
   attr(all_rows, "null_effect") <- detect_null_effect(sm)
@@ -232,8 +252,11 @@ tidy_meta.meta <- function(x,
 #' Extract study-level rows from a meta object
 #' @noRd
 extract_studies <- function(x, models) {
-  k <- x$k
-  if (is.null(k) || k == 0) {
+  # Number of study rows. `x$k` counts only the studies that contribute to
+  # pooling (it excludes e.g. double-zero studies in metabin()), whereas the
+  # study-level vectors (studlab, TE, ...) have one entry per study.
+  k <- length(x$studlab)
+  if (k == 0) {
     return(data.frame(
       studlab     = character(0),
       estimate    = numeric(0),
@@ -261,7 +284,14 @@ extract_studies <- function(x, models) {
     list(x$w.common, x$w.fixed, x$w.random)
   }
   w <- Find(usable, w_candidates)
-  if (is.null(w) && is.numeric(x$seTE) && any(is.finite(x$seTE))) {
+  # A generalised linear mixed model does not weight studies by the inverse of
+  # their variance, and meta leaves w.common / w.random empty for such fits.
+  # meta::forest() then drops the weight columns and draws equally sized
+  # squares, so skip the fallback rather than invent weights the model never
+  # used.
+  is_glmm <- !is.null(x$method) && any(x$method == "GLMM")
+  if (is.null(w) && !is_glmm &&
+      is.numeric(x$seTE) && any(is.finite(x$seTE))) {
     w <- 1 / x$seTE^2
   }
   if (is.null(w)) {
@@ -302,6 +332,33 @@ extract_studies <- function(x, models) {
     subgroup     = subgroup,
     stringsAsFactors = FALSE
   )
+}
+
+#' Use the observed value for single-group study estimates
+#'
+#' For a study with zero or all events, `metaprop()` and `metarate()` store a
+#' continuity-corrected `TE` (see `incr` / `method.incr`), so back-transforming
+#' it disagrees with the exact confidence limits: 12 of 12 events comes out as
+#' 0.96 against an interval reaching 1.00. `meta::forest()` plots the observed
+#' proportion (`event / n`) or rate (`event / time`) for every study of these
+#' types, whether or not a correction was applied and whatever the fitting
+#' method; this follows it. Summary rows keep their pooled estimates.
+#' @noRd
+use_observed_estimates <- function(rows, x) {
+  denom <- if (inherits(x, "metaprop")) {
+    x$n
+  } else if (inherits(x, "metarate")) {
+    x$time
+  } else {
+    return(rows)
+  }
+  if (is.null(x$event) || is.null(denom)) return(rows)
+
+  observed <- x$event / denom
+  idx <- match(as.character(rows$studlab), as.character(x$studlab))
+  sel <- !rows$is_summary & !is.na(idx)
+  rows$estimate[sel] <- observed[idx[sel]]
+  rows
 }
 
 #' Extract summary rows (common + random effects) from a meta object

@@ -16,6 +16,7 @@ tidy_meta(x, ...)
   add_summary = FALSE,
   summary_method = c("common", "random"),
   level = 0.95,
+  log_scale = FALSE,
   ...
 )
 
@@ -46,12 +47,22 @@ Needs a \code{se} column, or \code{ci_lower}/\code{ci_upper} to recover it. Defa
 \item{level}{Confidence level for the pooled summary interval. Default
 \code{0.95}.}
 
+\item{log_scale}{For the data-frame method with \code{add_summary = TRUE}: are
+the effects ratios (RR, OR, HR, ...) given on the natural scale? If \code{TRUE},
+they are pooled on the log scale and the summary is exponentiated back; a
+supplied \code{se} must be the standard error of the log estimate. Default
+\code{FALSE}.}
+
 \item{back_trans}{Should the estimate and confidence limits be
 back-transformed to the natural scale? If \code{"auto"} (default), each summary
 measure is back-transformed with its correct inverse via
 \code{\link[meta:backtransf]{meta::backtransf()}} (exponentiation for ratios, inverse-logit for
 \code{PLOGIT}, Fisher's z to correlation for \code{ZCOR}, etc.); linear measures are
-left unchanged. Use \code{"exp"} to force exponentiation or \code{"none"} to keep
+left unchanged. Study rows of \code{\link[meta:metaprop]{meta::metaprop()}} and \code{\link[meta:metarate]{meta::metarate()}}
+objects get the observed \code{event / n} or \code{event / time} instead, as in
+\code{\link[meta:forest]{meta::forest()}}, because the stored \code{TE} of a study with zero or all
+events is continuity-corrected and so disagrees with its exact confidence
+limits. Use \code{"exp"} to force exponentiation or \code{"none"} to keep
 the analysis scale.}
 
 \item{sort_studies}{If \code{TRUE} (default), sort studies by effect estimate
@@ -71,7 +82,8 @@ A \code{data.frame} with one row per study or summary, with columns:
 \item{ci_lower}{Lower confidence limit (numeric)}
 \item{ci_upper}{Upper confidence limit (numeric)}
 \item{se}{Standard error (numeric)}
-\item{weight}{Study weight (numeric, \code{NA} for summaries)}
+\item{weight}{Study weight (numeric, \code{NA} for summaries, and for
+every study of a \code{method = "GLMM"} fit, which uses none)}
 \item{p_value}{P-value (numeric)}
 \item{n}{Sample size or person-time (numeric, optional)}
 \item{event}{Number of events (numeric, optional)}
@@ -99,6 +111,7 @@ a tidy data frame suitable for use with ggmeta geometries and
 }
 \examples{
 \donttest{
+if (requireNamespace("meta", quietly = TRUE)) {
 library(meta)
 m <- metabin(event.e, n.e, event.c, n.c,
   data = data.frame(
@@ -109,5 +122,6 @@ m <- metabin(event.e, n.e, event.c, n.c,
   sm = "RR"
 )
 tidy_meta(m)
+}
 }
 }

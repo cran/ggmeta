@@ -1,6 +1,6 @@
 Package: ggmeta
 Title: Publication-Quality Forest and Funnel Plots with 'ggplot2'
-Version: 0.1.0
+Version: 0.1.1
 Authors@R: c(
     person(given = "Hercules R.",
            family = "Freitas",
@@ -29,11 +29,11 @@ Language: en-US
 VignetteBuilder: knitr
 Config/testthat/edition: 3
 Config/Needs/website: pkgdown
-Config/roxygen2/version: 8.0.0
+Config/roxygen2/version: 8.1.0
 NeedsCompilation: no
-Packaged: 2026-07-14 02:21:13 UTC; freitashr
+Packaged: 2026-09-22 02:05:00 UTC; freitashr
 Author: Hercules R. Freitas [aut, cre, cph] (ORCID:
     <https://orcid.org/0000-0003-1584-9157>)
 Maintainer: Hercules R. Freitas <hercules.freitas@uerj.br>
 Repository: CRAN
-Date/Publication: 2026-07-22 08:30:14 UTC
+Date/Publication: 2026-09-22 02:30:02 UTC

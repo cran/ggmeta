@@ -31,7 +31,14 @@
 #' @param ci_width Width of the CI line end-marks as a proportion of the
 #'   spacing between study rows. Default: `0.3`.
 #' @param point_size_range Minimum and maximum point size in mm.
-#'   Default: `c(1, 6)`.
+#'   Default: `c(1, 6)`. The side of each square is
+#'   `min + (max - min) * sqrt(weight / max(weight))`, i.e. the part above the
+#'   minimum grows with the square root of the weight. Missing or
+#'   non-positive weights get the minimum size; when no study has a usable
+#'   weight there is nothing to scale, so every square is drawn at the middle
+#'   of the range (as `meta::forest()` does for a `method = "GLMM"` fit). A
+#'   constant `size` (or a mapped `size` aesthetic) overrides the weight-based
+#'   size.
 #'
 #' @return A ggplot2 layer.
 #' @export
@@ -90,9 +97,12 @@ StatForestCI <- ggproto("StatForestCI", Stat,
   # back to the minimum square size rather than delete the study's CI row.
   required_aes = c("x", "xmin", "xmax", "y"),
 
+  # The square size is written to the `size` column here rather than mapped
+  # with `size = after_stat(...)`: an after_stat() mapping would send the
+  # values through ggplot2's default size scale, which rescales them a second
+  # time and breaks the documented weight-to-size relation.
   default_aes = aes(
-    weight = NA_real_,
-    size = after_stat(weight_sq)
+    weight = NA_real_
   ),
 
   setup_params = function(data, params) {
@@ -102,6 +112,7 @@ StatForestCI <- ggproto("StatForestCI", Stat,
   compute_panel = function(data, scales,
                            point_size_range = c(1, 6)) {
     if (nrow(data) == 0) return(data)
+    user_size <- "size" %in% names(data)
 
     # Compute square size from weight: area proportional to weight
     # Size (diameter) proportional to sqrt(weight)
@@ -117,8 +128,12 @@ StatForestCI <- ggproto("StatForestCI", Stat,
         from = c(0, 1)
       )
     } else {
-      data$weight_sq <- point_size_range[1]
+      # No usable weight anywhere: every square is the same size, so there is
+      # no reason to draw them all at the minimum.
+      data$weight_sq <- mean(point_size_range)
     }
+    # A size mapped by the user takes precedence over the weight-based size.
+    if (!user_size) data$size <- data$weight_sq
 
     data
   }

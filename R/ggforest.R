@@ -17,6 +17,7 @@
 #'
 #' @examples
 #' \donttest{
+#' if (requireNamespace("meta", quietly = TRUE)) {
 #' library(meta)
 #' m <- metabin(event.e, n.e, event.c, n.c,
 #'   data = data.frame(
@@ -29,6 +30,7 @@
 #'   sm = "RR"
 #' )
 #' ggforest(m)
+#' }
 #' }
 ggforest <- function(x, ...) {
   UseMethod("ggforest")
@@ -126,8 +128,13 @@ ggforest.meta <- function(
 #' @param add_summary For the data-frame method, if `TRUE` compute a pooled
 #'   summary from the study rows (inverse-variance and/or DerSimonian-Laird)
 #'   and draw it as a diamond — on-the-fly meta-analysis without the
-#'   \pkg{meta} package. Needs a `se` column, or `ci_lower`/`ci_upper` to
-#'   recover it. Default: `FALSE`.
+#'   \pkg{meta} package. Needs a `se` column, or `ci_lower`/`ci_upper` (a
+#'   95% Wald interval) to recover it. When `null_effect = 1` (ratio
+#'   measures), estimates and limits are taken to be on the ratio scale and
+#'   are pooled on the log scale; a supplied `se` must then be the standard
+#'   error of the log estimate. The `weight` column only sizes the squares and
+#'   does not enter the pooled estimate. Studies with a missing estimate or a
+#'   non-positive standard error are excluded with a message. Default: `FALSE`.
 #' @param summary_method Which pooled summaries to add when `add_summary =
 #'   TRUE`: `"common"`, `"random"`, or both (default).
 #' @param level Confidence level for the pooled summary interval. Default
@@ -212,15 +219,19 @@ ggforest.data.frame <- function(
   # On-the-fly pooling: append computed summary rows from the study rows so
   # they render as a diamond at the bottom (via the factor ordering below).
   if (isTRUE(add_summary)) {
+    # Ratio measures (null effect at 1) are pooled on the log scale.
+    ratio_scale <- !is.null(null_effect) && length(null_effect) == 1L &&
+      !is.na(null_effect) && null_effect == 1
     # Give studies inverse-variance weights for square sizing if none supplied.
     if (all(is.na(x$weight))) {
       se_x <- x$se
       if (is.null(se_x) || all(is.na(se_x))) {
-        se_x <- (x$ci_upper - x$ci_lower) / (2 * stats::qnorm(0.975))
+        se_x <- se_from_ci(x$ci_lower, x$ci_upper, ratio_scale)
       }
       x$weight <- ifelse(is.finite(se_x) & se_x > 0, 1 / se_x^2, NA_real_)
     }
-    summ <- build_summary_rows(x, method = summary_method, level = level)
+    summ <- build_summary_rows(x, method = summary_method, level = level,
+                               log_scale = ratio_scale)
     if (!is.null(summ)) {
       for (col in setdiff(names(x), names(summ))) summ[[col]] <- NA
       x <- rbind(x, summ[names(x)])
@@ -392,15 +403,32 @@ ggforest.data.frame <- function(
 #' both linear and log axes.
 #' @noRd
 forest_columns_spec <- function(x, columns, sm, effect_header, log_scale) {
-  # Study weight percentages (over the real study rows only).
+  # Study weight percentages (over the real study rows only). A negative or
+  # infinite weight has no share of the total to report, so it is dropped to a
+  # blank cell and kept out of the denominator; a zero weight is a real 0.0%.
   is_study <- !x$is_summary & x$summary_type == "none"
-  wsum <- sum(x$weight[is_study], na.rm = TRUE)
+  w <- x$weight
+  drop <- which(is_study & !is.na(w) & (!is.finite(w) | w < 0))
+  if (length(drop) > 0) {
+    dropped <- as.character(x$studlab)[drop]
+    cli::cli_inform(c(
+      "i" = "Ignored a negative or non-finite weight for {length(dropped)} stud{?y/ies}: {.val {dropped}}."
+    ))
+    w[drop] <- NA_real_
+  }
+  wsum <- sum(w[which(is_study & !is.na(w) & w > 0)])
   wpct <- rep(NA_real_, nrow(x))
   if (is.finite(wsum) && wsum > 0) {
-    wpct[is_study] <- x$weight[is_study] / wsum * 100
+    wpct[is_study] <- w[is_study] / wsum * 100
   }
 
-  f2 <- function(v) formatC(v, format = "f", digits = 2)
+  f2 <- function(v) {
+    # Round first and drop the sign of values that round to zero, so that
+    # e.g. -0.001 is printed as "0.00" rather than "-0.00".
+    v <- round(v, 2)
+    v[!is.na(v) & v == 0] <- 0
+    formatC(v, format = "f", digits = 2)
+  }
   cells <- list(
     estimate = ifelse(is.na(x$estimate), "", f2(x$estimate)),
     ci = ifelse(
@@ -485,6 +513,21 @@ forest_columns_spec <- function(x, columns, sm, effect_header, log_scale) {
   )
 }
 
+#' Format a p-value for the heterogeneity caption
+#'
+#' Returns the relation and value as one string, e.g. `"= 0.090"` or
+#' `"< 0.001"`, so that very small p-values are not printed as `"= 0.000"`.
+#' @noRd
+format_pval_label <- function(p, digits = 3) {
+  if (length(p) != 1L || is.na(p)) return("= NA")
+  threshold <- 10^(-digits)
+  if (p < threshold) {
+    paste("<", formatC(threshold, format = "f", digits = digits))
+  } else {
+    paste("=", formatC(p, format = "f", digits = digits))
+  }
+}
+
 #' Build a plotmath caption with heterogeneity statistics
 #'
 #' Returns a plotmath expression (not a character string) so that the
@@ -499,16 +542,26 @@ build_hetstats_caption <- function(x, is_random) {
     return(NULL)
   }
 
+  # A generalised linear mixed model tests heterogeneity twice, so it stores Q,
+  # df.Q and pval.Q as a (Wald, LRT) pair. meta::forest() keeps the first of
+  # each for its single-line caption ("Keep the first heterogeneity
+  # statistics"), which is the Wald test; take the same element so that Q and
+  # p describe one test and neither reaches sprintf() as a vector. df.Q pairs
+  # with them but is not printed here.
+  first_stat <- function(v) {
+    v <- unlist(v)
+    if (length(v) > 1L) v[[1L]] else v
+  }
+
   i2   <- sprintf("%.0f", (x$I2 %||% NA_real_) * 100)
   tau2 <- sprintf("%.4f", x$tau2)
 
   if (!is.null(x$Q) && !is.null(x$pval.Q)) {
-    q  <- sprintf("%.2f", x$Q)
-    pq <- sprintf("%.3f", x$pval.Q)
+    q  <- sprintf("%.2f", first_stat(x$Q))
     bquote(
       "Heterogeneity:" ~ italic(I)^2 ~ "=" ~ .(i2) * "%;" ~
         tau^2 ~ "=" ~ .(tau2) * ";" ~ italic(Q) ~ "=" ~ .(q) * "," ~
-        italic(p) ~ "=" ~ .(pq)
+        italic(p) ~ .(format_pval_label(first_stat(x$pval.Q)))
     )
   } else {
     bquote(
